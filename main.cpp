@@ -140,8 +140,8 @@ private:
         if (VERBOSE) {
             // List all available extensions
             std::cout << "Available extensions:\n";
-            for (auto &&extension: _context.enumerateInstanceExtensionProperties()) {
-                std::cout << '\t' << extension.extensionName << '\n';
+            for (auto &[extensionName, specVersion]: _context.enumerateInstanceExtensionProperties()) {
+                std::cout << '\t' << extensionName << '\n';
             }
         }
 
@@ -465,7 +465,7 @@ private:
      * @param surfaceCapabilities The surface capabilities of the physical device and surface, which include the minimum and maximum extents for the swap chain.
      * @return The chosen swap chain extent as a vk::Extent2D object, which represents the width and height of the swap chain images.
      */
-    vk::Extent2D chooseSwapChainExtent(const vk::SurfaceCapabilitiesKHR &surfaceCapabilities) const {
+    [[nodiscard]] vk::Extent2D chooseSwapChainExtent(const vk::SurfaceCapabilitiesKHR &surfaceCapabilities) const {
         if (surfaceCapabilities.currentExtent.width != UINT32_MAX) {
             return surfaceCapabilities.currentExtent;
         }
@@ -552,13 +552,13 @@ private:
      * @param code A vector of characters containing the SPIR-V bytecode for the shader module.
      * @return A vk::raii::ShaderModule object representing the created shader module.
      */
-    vk::raii::ShaderModule createShaderModule(const std::vector<char> &code) const {
+    [[nodiscard]] vk::raii::ShaderModule createShaderModule(const std::vector<char> &code) const {
         const vk::ShaderModuleCreateInfo shaderModule{
             .codeSize = code.size() * sizeof(char),
             .pCode    = reinterpret_cast<const uint32_t *>(code.data())
         };
 
-        return vk::raii::ShaderModule(_logicalDevice, shaderModule);
+        return {_logicalDevice, shaderModule};
     }
 };
 
