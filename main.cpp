@@ -44,15 +44,22 @@ private:
     vk::raii::Device                 _logicalDevice      = nullptr;
     vk::raii::Queue                  _graphicsQueue      = nullptr;
     uint32_t                         _graphicsQueueIndex = UINT32_MAX;
-    vk::raii::SwapchainKHR           _swapChain          = nullptr;
-    std::vector<vk::raii::ImageView> _swapChainImageViews;
+
+    vk::raii::SwapchainKHR           _swapChain = nullptr;
     std::vector<vk::Image>           _swapChainImages;
     vk::SurfaceFormatKHR             _swapChainSurfaceFormat;
     vk::Extent2D                     _swapChainExtent;
-    vk::raii::PipelineLayout         _pipelineLayout   = nullptr;
-    vk::raii::Pipeline               _graphicsPipeline = nullptr;
-    vk::raii::CommandPool            _commandPool      = nullptr;
-    vk::raii::CommandBuffer          _commandBuffer    = nullptr;
+    std::vector<vk::raii::ImageView> _swapChainImageViews;
+
+    vk::raii::PipelineLayout _pipelineLayout   = nullptr;
+    vk::raii::Pipeline       _graphicsPipeline = nullptr;
+
+    vk::raii::CommandPool   _commandPool   = nullptr;
+    vk::raii::CommandBuffer _commandBuffer = nullptr;
+
+    vk::raii::Semaphore _presentCompleteSemaphore = nullptr;
+    vk::raii::Semaphore _renderFinishedSemaphore  = nullptr;
+    vk::raii::Fence     _drawFence                = nullptr;
 
 private:
     void initWindow() {
@@ -75,12 +82,15 @@ private:
         createGraphicsPipeline();
         createCommandPool();
         createCommandBuffer();
+        createSyncObjects();
     }
 
-    void mainLoop() const {
+    void mainLoop() {
         while (!glfwWindowShouldClose(_window)) {
             glfwPollEvents();
+            drawFrame();
         }
+        _logicalDevice.waitIdle();
     }
 
     void cleanup() const {
@@ -90,12 +100,6 @@ private:
     }
 
 private:
-    /**
-     * @brief Create a Vulkan instance with the required application info, layers, and extensions.
-     *        This function checks for the availability of required layers and extensions, and throws an exception if any of them are not supported by the Vulkan implementation.
-     *        If validation layers are enabled, it also sets up a debug messenger to receive validation messages.
-     *        The created instance is stored in the _instance member variable.
-     */
     void createInstance() {
         constexpr vk::ApplicationInfo appInfo{
                 .pApplicationName   = "Hello Triangle",
@@ -162,12 +166,6 @@ private:
         _instance = vk::raii::Instance(_context, instance);
     }
 
-    /**
-     * @brief Set up a debug messenger to receive validation messages from the Vulkan implementation.
-     *        This function creates a vk::DebugUtilsMessengerEXT object and stores it in the _debugMessenger member variable.
-     *        The debug messenger is only created if validation layers are enabled.
-     *        The debug callback function is defined as a static member function of the HelloTriangleApplication class.
-     */
     void setupDebugMessenger() {
         if constexpr (!ENABLE_VALIDATION_LAYERS)
             return;
@@ -186,12 +184,6 @@ private:
         _debugMessenger = vk::raii::DebugUtilsMessengerEXT(_instance, debugMessenger);
     }
 
-    /**
-     * @brief Create a Vulkan surface for the GLFW window.
-     *        This function uses the glfwCreateWindowSurface function to create a VkSurfaceKHR object for the GLFW window and stores it in the _surface member variable.
-     *        If the surface creation fails, an exception is thrown.
-     *        The created surface is used for presenting rendered images to the window.
-     */
     void createSurface() {
         VkSurfaceKHR surface;
         if (glfwCreateWindowSurface(*_instance, _window, nullptr, &surface) != VK_SUCCESS) {
@@ -201,11 +193,6 @@ private:
         _surface = vk::raii::SurfaceKHR(_instance, surface);
     }
 
-    /**
-     * @brief Pick a suitable physical device (GPU) for the Vulkan application.
-     *        This function enumerates the available physical devices and checks if any of them meet the required criteria for suitability.
-     *        The suitability criteria include support for Vulkan 1.3, support for graphics operations, availability of required device extensions, and support for required features.
-     */
     void pickPhysicalDevice() {
         const auto physicalDevices  = _instance.enumeratePhysicalDevices();
         const auto physicalDeviceIt = std::ranges::find_if(physicalDevices, [&](auto &&physicalDevice) { return isDeviceSuitable(physicalDevice); });
@@ -216,13 +203,6 @@ private:
         _physicalDevice = *physicalDeviceIt;
     }
 
-    /**
-     * @brief Create a logical device from the selected physical device.
-     *        This function finds a queue family that supports both graphics and presentation operations, and creates a logical device with a graphics queue.
-     *        It also queries for Vulkan 1.3 features and enables the required extensions for the logical device.
-     *        The created logical device is stored in the _logicalDevice member variable, and the graphics queue is stored in the _graphicsQueue member variable.
-     *        If no suitable queue family is found, an exception is thrown.
-     */
     void createLogicalDevice() {
         // Get the index of the first queue family that supports graphics and presentation
         const auto queueFamilies = _physicalDevice.getQueueFamilyProperties();
@@ -243,10 +223,21 @@ private:
                            vk::PhysicalDeviceVulkan13Features,
                            vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>
                 featureChain = {
-                        {},                             // vk::PhysicalDeviceFeatures2
-                        {.shaderDrawParameters = true}, // vk::PhysicalDeviceVulkan11Features
-                        {.dynamicRendering = true},     // vk::PhysicalDeviceVulkan13Features
-                        {.extendedDynamicState = true}  // vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT
+                        // vk::PhysicalDeviceFeatures2
+                        {},
+                        // vk::PhysicalDeviceVulkan11Features
+                        {
+                                .shaderDrawParameters = true
+                        },
+                        // vk::PhysicalDeviceVulkan13Features
+                        {
+                                .synchronization2 = true,
+                                .dynamicRendering = true
+                        },
+                        // vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT
+                        {
+                                .extendedDynamicState = true
+                        }
                 };
 
         // Create a logical device
@@ -268,13 +259,6 @@ private:
         _graphicsQueue = vk::raii::Queue(_logicalDevice, _graphicsQueueIndex, 0);
     }
 
-    /**
-     * @brief Create a swap chain for the logical device and surface.
-     *        This function queries the surface capabilities, available formats, and present modes, and chooses suitable values for the swap chain creation.
-     *        It then creates a vk::SwapchainKHR object and stores it in the _swapChain member variable, along with the swap chain images in the _swapChainImages member variable.
-     *        The swap chain is used for presenting rendered images to the window, and the images are used as color attachments in the rendering pipeline.
-     *        If the swap chain creation fails, an exception is thrown.
-     */
     void createSwapChain() {
         const auto surfaceCapabilities = _physicalDevice.getSurfaceCapabilitiesKHR(*_surface);
         _swapChainExtent               = chooseSwapChainExtent(surfaceCapabilities);
@@ -305,11 +289,6 @@ private:
         _swapChainImages = _swapChain.getImages();
     }
 
-    /**
-     * @brief Create image views for the swap chain images.
-     *        This function creates a vk::ImageView for each swap chain image, using the chosen surface format and color aspect.
-     *        The created image views are stored in the _swapChainImageViews member variable, and are used as color attachments in the rendering pipeline.
-     */
     void createImageViews() {
         assert(_swapChainImageViews.empty());
 
@@ -416,17 +395,75 @@ private:
         _graphicsPipeline = vk::raii::Pipeline(_logicalDevice, nullptr, pipelineChain.get<vk::GraphicsPipelineCreateInfo>());
     }
 
+    void createCommandPool() {
+        const vk::CommandPoolCreateInfo commandPool{
+                .flags            = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+                .queueFamilyIndex = _graphicsQueueIndex
+        };
+        _commandPool = vk::raii::CommandPool(_logicalDevice, commandPool);
+    }
+
+    void createCommandBuffer() {
+        const vk::CommandBufferAllocateInfo commandBuffer{
+                .commandPool        = _commandPool,
+                .level              = vk::CommandBufferLevel::ePrimary,
+                .commandBufferCount = 1
+        };
+        _commandBuffer = std::move(vk::raii::CommandBuffers(_logicalDevice, commandBuffer).front());
+    }
+
+    void createSyncObjects() {
+        _presentCompleteSemaphore = vk::raii::Semaphore(_logicalDevice, vk::SemaphoreCreateInfo());
+        _renderFinishedSemaphore  = vk::raii::Semaphore(_logicalDevice, vk::SemaphoreCreateInfo());
+        _drawFence                = vk::raii::Fence(_logicalDevice, {.flags = vk::FenceCreateFlagBits::eSignaled});
+    }
+
+    void drawFrame() {
+        if (_logicalDevice.waitForFences(*_drawFence, vk::True, UINT64_MAX) != vk::Result::eSuccess) {
+            throw std::runtime_error("failed to wait for fence!");
+        }
+        _logicalDevice.resetFences(*_drawFence);
+
+        auto [result, imageIndex] = _swapChain.acquireNextImage(UINT64_MAX, *_presentCompleteSemaphore, nullptr);
+
+        recordCommandBuffer(imageIndex);
+
+        _graphicsQueue.waitIdle(); // NOTE: for simplicity, wait for the queue to be idle before starting the frame
+        // In the next chapter you see how to use multiple frames in flight and fences to sync
+
+        vk::PipelineStageFlags waitDestinationStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput);
+        const vk::SubmitInfo   submitInfo{
+                .waitSemaphoreCount   = 1,
+                .pWaitSemaphores      = &*_presentCompleteSemaphore,
+                .pWaitDstStageMask    = &waitDestinationStageMask,
+                .commandBufferCount   = 1,
+                .pCommandBuffers      = &*_commandBuffer,
+                .signalSemaphoreCount = 1,
+                .pSignalSemaphores    = &*_renderFinishedSemaphore
+        };
+        _graphicsQueue.submit(submitInfo, *_drawFence);
+
+        const vk::PresentInfoKHR presentInfoKHR{
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores    = &*_renderFinishedSemaphore,
+                .swapchainCount     = 1,
+                .pSwapchains        = &*_swapChain,
+                .pImageIndices      = &imageIndex
+        };
+        result = _graphicsQueue.presentKHR(presentInfoKHR);
+
+        switch (result) {
+            case vk::Result::eSuccess:
+                break;
+            case vk::Result::eSuboptimalKHR:
+                std::cout << "vk::Queue::presentKHR returned vk::Result::eSuboptimalKHR !\n";
+                break;
+            default:
+                break; // an unexpected result is returned!
+        }
+    }
+
 private:
-    /**
-     * @brief Debug callback function for Vulkan validation layers.
-     *        This function is called by the Vulkan implementation when a validation message is generated.
-     *        It prints the message type and message content to the standard error stream.
-     * @param severity flags indicating the severity of the message (e.g., warning, error)
-     * @param type flags indicating the type of the message (e.g., general, performance, validation)
-     * @param pCallbackData pointer to a structure containing the message data, including the message string
-     * @param pUserData pointer to user-defined data passed to the callback
-     * @return vk::Bool32 indicating whether the Vulkan call that triggered the validation message should be aborted (vk::False means continue execution)
-     */
     static VKAPI_ATTR vk::Bool32 VKAPI_CALL debugCallback(vk::DebugUtilsMessageSeverityFlagBitsEXT      severity,
                                                           const vk::DebugUtilsMessageTypeFlagsEXT       type,
                                                           const vk::DebugUtilsMessengerCallbackDataEXT *pCallbackData,
@@ -435,11 +472,6 @@ private:
         return vk::False;
     }
 
-    /**
-     * @brief Get the required Vulkan instance extensions for GLFW and validation layers (if enabled).
-     *        This function queries GLFW for the required instance extensions and adds the VK_EXT_debug_utils extension if validation layers are enabled.
-     * @return A vector of C-style strings containing the names of the required instance extensions.
-     */
     static std::vector<const char *> getRequiredInstanceExtensions() {
         uint32_t   glfwExtensionCount = 0;
         const auto glfwExtensions     = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
@@ -452,12 +484,6 @@ private:
         return extensions;
     }
 
-    /**
-     * @brief Check if a physical device is suitable for the Vulkan application.
-     *        This function checks if the physical device supports Vulkan 1.3, has a queue family that supports graphics operations, has all required device extensions, and supports the required features.
-     * @param physicalDevice The physical device to check for suitability.
-     * @return true if the physical device meets all the criteria for suitability, false otherwise.
-     */
     static bool isDeviceSuitable(const vk::raii::PhysicalDevice &physicalDevice) {
         // Check if the physical device supports the Vulkan 1.3 API version
         bool supportsVulkan1_3 = physicalDevice.getProperties().apiVersion >= vk::ApiVersion13;
@@ -487,13 +513,6 @@ private:
         return supportsVulkan1_3 && supportGraphics && supportsAllRequiredExtensions && supportRequiredFeatures;
     }
 
-    /**
-     * @brief Choose the swap chain extent (resolution) based on the surface capabilities and the current framebuffer size of the GLFW window.
-     *        If the surface capabilities specify a current extent (not equal to UINT32_MAX), it is returned as the swap chain extent.
-     *        Otherwise, the current framebuffer size of the GLFW window is queried and clamped to the minimum and maximum extents specified by the surface capabilities.
-     * @param surfaceCapabilities The surface capabilities of the physical device and surface, which include the minimum and maximum extents for the swap chain.
-     * @return The chosen swap chain extent as a vk::Extent2D object, which represents the width and height of the swap chain images.
-     */
     [[nodiscard]] vk::Extent2D chooseSwapChainExtent(const vk::SurfaceCapabilitiesKHR &surfaceCapabilities) const {
         if (surfaceCapabilities.currentExtent.width != UINT32_MAX) {
             return surfaceCapabilities.currentExtent;
@@ -508,13 +527,6 @@ private:
         };
     }
 
-    /**
-     * @brief Choose the minimum number of images for the swap chain based on the surface capabilities.
-     *        The minimum number of images is determined by taking the maximum of 3 and the minimum image count specified in the surface capabilities.
-     *        If the maximum image count is greater than 0 and less than the calculated minimum image count, the maximum image count is used instead.
-     * @param surfaceCapabilities The surface capabilities of the physical device and surface, which include the minimum and maximum image counts for the swap chain.
-     * @return The chosen minimum number of images for the swap chain as a uint32_t value.
-     */
     static uint32_t chooseSwapChainMinImageCount(const vk::SurfaceCapabilitiesKHR &surfaceCapabilities) {
         auto minImageCount = std::max(3u, surfaceCapabilities.minImageCount);
         if (0 < surfaceCapabilities.maxImageCount && surfaceCapabilities.maxImageCount < minImageCount) {
@@ -523,13 +535,6 @@ private:
         return minImageCount;
     }
 
-    /**
-     * @brief Choose the swap chain surface format from the available formats.
-     *        This function searches for a preferred format (vk::Format::eB8G8R8A8Srgb with vk::ColorSpaceKHR::eSrgbNonlinear) in the list of available formats.
-     *        If the preferred format is found, it is returned; otherwise, the first available format is returned.
-     * @param availableFormats A vector of vk::SurfaceFormatKHR objects representing the available surface formats for the swap chain.
-     * @return The chosen swap chain surface format as a vk::SurfaceFormatKHR object, which includes the format and color space for the swap chain images.
-     */
     static vk::SurfaceFormatKHR chooseSwapChainSurfaceFormat(const std::vector<vk::SurfaceFormatKHR> &availableFormats) {
         assert(!availableFormats.empty());
         const auto formatIt = std::ranges::find_if(availableFormats, [](auto &&format) {
@@ -538,14 +543,6 @@ private:
         return formatIt != availableFormats.end() ? *formatIt : availableFormats[0];
     }
 
-    /**
-     * @brief Choose the swap chain present mode from the available present modes.
-     *        This function checks if the preferred present mode (vk::PresentModeKHR::eMailbox) is available in the list of available present modes.
-     *        If the preferred present mode is found, it is returned; otherwise, the fallback present mode (vk::PresentModeKHR::eFifo) is returned.
-     *        The function asserts that the fallback present mode is always available, as it is guaranteed to be supported by all Vulkan implementations.
-     * @param availablePresentModes A vector of vk::PresentModeKHR values representing the available present modes for the swap chain.
-     * @return The chosen swap chain present mode as a vk::PresentModeKHR value, which determines how images are presented to the surface (e.g., mailbox, fifo, immediate).
-     */
     static vk::PresentModeKHR chooseSwapChainPresentMode(const std::vector<vk::PresentModeKHR> &availablePresentModes) {
         assert(std::ranges::any_of(availablePresentModes, [](auto &&presentMode) { return presentMode == vk::PresentModeKHR::eFifo; }));
         return std::ranges::any_of(availablePresentModes, [](auto &&presentMode) { return presentMode == vk::PresentModeKHR::eMailbox; })
@@ -553,13 +550,6 @@ private:
                    : vk::PresentModeKHR::eFifo;
     }
 
-    /**
-     * @brief Read the contents of a file into a vector of characters.
-     *        This function opens the specified file in binary mode, reads its contents into a vector of characters, and returns the vector.
-     *        If the file cannot be opened, an exception is thrown.
-     * @param filename The name of the file to read.
-     * @return A vector of characters containing the contents of the file.
-     */
     static std::vector<char> readFile(const std::string &filename) {
         std::ifstream file(filename, std::ios::ate | std::ios::binary);
         if (!file.is_open()) {
@@ -574,13 +564,6 @@ private:
         return buffer;
     }
 
-    /**
-     * @brief Create a Vulkan shader module from SPIR-V bytecode.
-     *        This function takes a vector of characters containing the SPIR-V bytecode for the shader module, creates a vk::ShaderModuleCreateInfo structure with the appropriate parameters, and creates a vk::raii::ShaderModule object using the logical device.
-     *        The created shader module is returned to the caller. If the shader module creation fails, an exception is thrown.
-     * @param code A vector of characters containing the SPIR-V bytecode for the shader module.
-     * @return A vk::raii::ShaderModule object representing the created shader module.
-     */
     [[nodiscard]] vk::raii::ShaderModule createShaderModule(const std::vector<char> &code) const {
         const vk::ShaderModuleCreateInfo shaderModule{
                 .codeSize = code.size() * sizeof(char),
@@ -588,6 +571,96 @@ private:
         };
 
         return {_logicalDevice, shaderModule};
+    }
+
+    void recordCommandBuffer(const uint32_t imageIndex) const {
+        _commandBuffer.begin({});
+
+        // Before starting rendering, transition the swapchain image to vk::ImageLayout::eColorAttachmentOptimal
+        transitionImageLayout(
+                imageIndex,
+                vk::ImageLayout::eUndefined,
+                vk::ImageLayout::eColorAttachmentOptimal,
+                {},                                                 // srcAccessMask (no need to wait for previous operations)
+                vk::AccessFlagBits2::eColorAttachmentWrite,         // dstAccessMask
+                vk::PipelineStageFlagBits2::eColorAttachmentOutput, // srcStage
+                vk::PipelineStageFlagBits2::eColorAttachmentOutput  // dstStage
+                );
+
+        constexpr vk::ClearValue    clearColor     = vk::ClearColorValue(0.0f, 0.0f, 0.0f, 1.0f);
+        vk::RenderingAttachmentInfo attachmentInfo = {
+                .imageView   = _swapChainImageViews[imageIndex],
+                .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                .loadOp      = vk::AttachmentLoadOp::eClear,
+                .storeOp     = vk::AttachmentStoreOp::eStore,
+                .clearValue  = clearColor};
+        const vk::RenderingInfo renderingInfo = {
+                .renderArea = {
+                        .offset = {0, 0},
+                        .extent = _swapChainExtent
+                },
+                .layerCount           = 1,
+                .colorAttachmentCount = 1,
+                .pColorAttachments    = &attachmentInfo};
+
+        _commandBuffer.beginRendering(renderingInfo);
+        {
+            _commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *_graphicsPipeline);
+            _commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f,
+                                                       static_cast<float>(_swapChainExtent.width), static_cast<float>(_swapChainExtent.height),
+                                                       0.0f, 1.0f));
+            _commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), _swapChainExtent));
+            _commandBuffer.draw(3, 1, 0, 0);
+        }
+        _commandBuffer.endRendering();
+
+        // After rendering, transition the swapchain image to vk::ImageLayout::ePresentSrcKHR
+        transitionImageLayout(
+                imageIndex,
+                vk::ImageLayout::eColorAttachmentOptimal,
+                vk::ImageLayout::ePresentSrcKHR,
+                vk::AccessFlagBits2::eColorAttachmentWrite,         // srcAccessMask
+                {},                                                 // dstAccessMask
+                vk::PipelineStageFlagBits2::eColorAttachmentOutput, // srcStage
+                vk::PipelineStageFlagBits2::eBottomOfPipe           // dstStage
+                );
+
+        _commandBuffer.end();
+    }
+
+    void transitionImageLayout(const uint32_t                imageIndex,
+                               const vk::ImageLayout         oldLayout,
+                               const vk::ImageLayout         newLayout,
+                               const vk::AccessFlags2        srcAccessMask,
+                               const vk::AccessFlags2        dstAccessMask,
+                               const vk::PipelineStageFlags2 srcStageMask,
+                               const vk::PipelineStageFlags2 dstStageMask) const {
+        vk::ImageMemoryBarrier2 barrier = {
+                .srcStageMask        = srcStageMask,
+                .srcAccessMask       = srcAccessMask,
+                .dstStageMask        = dstStageMask,
+                .dstAccessMask       = dstAccessMask,
+                .oldLayout           = oldLayout,
+                .newLayout           = newLayout,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image               = _swapChainImages[imageIndex],
+                .subresourceRange    = {
+                        .aspectMask     = vk::ImageAspectFlagBits::eColor,
+                        .baseMipLevel   = 0,
+                        .levelCount     = 1,
+                        .baseArrayLayer = 0,
+                        .layerCount     = 1
+                }
+        };
+
+        const vk::DependencyInfo dependency_info = {
+                .dependencyFlags         = {},
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers    = &barrier
+        };
+
+        _commandBuffer.pipelineBarrier2(dependency_info);
     }
 };
 
